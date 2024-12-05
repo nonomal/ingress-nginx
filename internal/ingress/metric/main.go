@@ -25,8 +25,8 @@ import (
 	"k8s.io/klog/v2"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/metric/collectors"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
 )
 
 // Collector defines the interface for a metric collector
@@ -43,13 +43,16 @@ type Collector interface {
 
 	IncCheckCount(string, string)
 	IncCheckErrorCount(string, string)
+	IncOrphanIngress(string, string, string)
+	DecOrphanIngress(string, string, string)
 
-	RemoveMetrics(ingresses, endpoints []string)
+	RemoveMetrics(ingresses, certificates []string)
 
 	SetSSLExpireTime([]*ingress.Server)
+	SetSSLInfo(servers []*ingress.Server)
 
 	// SetHosts sets the hostnames that are being served by the ingress controller
-	SetHosts(sets.String)
+	SetHosts(set sets.Set[string])
 
 	Start(string)
 	Stop(string)
@@ -68,7 +71,7 @@ type collector struct {
 }
 
 // NewCollector creates a new metric collector the for ingress controller
-func NewCollector(metricsPerHost bool, registry *prometheus.Registry, ingressclass string) (Collector, error) {
+func NewCollector(metricsPerHost, metricsPerUndefinedHost, reportStatusClasses bool, registry *prometheus.Registry, ingressclass string, buckets collectors.HistogramBuckets, bucketFactor float64, maxBuckets uint32, excludedSocketMetrics []string) (Collector, error) {
 	podNamespace := os.Getenv("POD_NAMESPACE")
 	if podNamespace == "" {
 		podNamespace = "default"
@@ -86,7 +89,7 @@ func NewCollector(metricsPerHost bool, registry *prometheus.Registry, ingresscla
 		return nil, err
 	}
 
-	s, err := collectors.NewSocketCollector(podName, podNamespace, ingressclass, metricsPerHost)
+	s, err := collectors.NewSocketCollector(podName, podNamespace, ingressclass, metricsPerHost, metricsPerUndefinedHost, reportStatusClasses, buckets, bucketFactor, maxBuckets, excludedSocketMetrics)
 	if err != nil {
 		return nil, err
 	}
@@ -112,11 +115,11 @@ func (c *collector) ConfigSuccess(hash uint64, success bool) {
 	c.ingressController.ConfigSuccess(hash, success)
 }
 
-func (c *collector) IncCheckCount(namespace string, name string) {
+func (c *collector) IncCheckCount(namespace, name string) {
 	c.ingressController.IncCheckCount(namespace, name)
 }
 
-func (c *collector) IncCheckErrorCount(namespace string, name string) {
+func (c *collector) IncCheckErrorCount(namespace, name string) {
 	c.ingressController.IncCheckErrorCount(namespace, name)
 }
 
@@ -128,9 +131,9 @@ func (c *collector) IncReloadErrorCount() {
 	c.ingressController.IncReloadErrorCount()
 }
 
-func (c *collector) RemoveMetrics(ingresses, hosts []string) {
+func (c *collector) RemoveMetrics(ingresses, certificates []string) {
 	c.socket.RemoveMetrics(ingresses, c.registry)
-	c.ingressController.RemoveMetrics(hosts, c.registry)
+	c.ingressController.RemoveMetrics(certificates, c.registry)
 }
 
 func (c *collector) Start(admissionStatus string) {
@@ -175,11 +178,24 @@ func (c *collector) SetSSLExpireTime(servers []*ingress.Server) {
 	c.ingressController.SetSSLExpireTime(servers)
 }
 
-func (c *collector) SetHosts(hosts sets.String) {
+func (c *collector) SetSSLInfo(servers []*ingress.Server) {
+	klog.V(2).Infof("Updating ssl certificate info metrics")
+	c.ingressController.SetSSLInfo(servers)
+}
+
+func (c *collector) IncOrphanIngress(namespace, name, orphanityType string) {
+	c.ingressController.IncOrphanIngress(namespace, name, orphanityType)
+}
+
+func (c *collector) DecOrphanIngress(namespace, name, orphanityType string) {
+	c.ingressController.DecOrphanIngress(namespace, name, orphanityType)
+}
+
+func (c *collector) SetHosts(hosts sets.Set[string]) {
 	c.socket.SetHosts(hosts)
 }
 
-func (c *collector) SetAdmissionMetrics(testedIngressLength float64, testedIngressTime float64, renderingIngressLength float64, renderingIngressTime float64, testedConfigurationSize float64, admissionTime float64) {
+func (c *collector) SetAdmissionMetrics(testedIngressLength, testedIngressTime, renderingIngressLength, renderingIngressTime, testedConfigurationSize, admissionTime float64) {
 	c.admissionController.SetAdmissionMetrics(
 		testedIngressLength,
 		testedIngressTime,
@@ -200,12 +216,10 @@ func (c *collector) OnStartedLeading(electionID string) {
 func (c *collector) OnStoppedLeading(electionID string) {
 	setLeader(false)
 	c.ingressController.OnStoppedLeading(electionID)
-	c.ingressController.RemoveAllSSLExpireMetrics(c.registry)
+	c.ingressController.RemoveAllSSLMetrics(c.registry)
 }
 
-var (
-	currentLeader uint32
-)
+var currentLeader uint32
 
 func setLeader(leader bool) {
 	var i uint32

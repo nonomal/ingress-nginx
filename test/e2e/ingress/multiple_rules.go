@@ -20,7 +20,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	networking "k8s.io/api/networking/v1"
 
@@ -31,11 +31,14 @@ var _ = framework.IngressNginxDescribe("single ingress - multiple hosts", func()
 	f := framework.NewDefaultFramework("simh")
 	pathprefix := networking.PathTypePrefix
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithNameAndReplicas("first-service", 1)
-		f.NewEchoDeploymentWithNameAndReplicas("second-service", 1)
+		f.NewEchoDeployment(framework.WithDeploymentName("first-service"))
+		f.NewEchoDeployment(framework.WithDeploymentName("second-service"))
 	})
 
 	ginkgo.It("should set the correct $service_name NGINX variable", func() {
+		disableSnippet := f.AllowSnippetConfiguration()
+		defer disableSnippet()
+
 		annotations := map[string]string{
 			"nginx.ingress.kubernetes.io/configuration-snippet": `more_set_input_headers "service-name: $service_name";`,
 		}
